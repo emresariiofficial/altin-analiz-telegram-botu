@@ -4,8 +4,12 @@ import time
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 import requests
+import numpy as np
 import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.linear_model import LinearRegression
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -16,15 +20,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GRUP_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# 2. SEÇENEK: Otomatik piyasa değişim eşiği (TL cinsinden)
+# Otomatik piyasa değişim eşiği (TL cinsinden) ve kontrol periyodu
 FIYAT_DEGISIM_ESIGI_TL = 20.0
 KONTROL_ARALIGI_SN = 45
 
-# 3. SEÇENEK: Kullanıcıların kurduğu özel hedef fiyat alarmları listesi
-# Her öğe: {"kisi": "Ada Su", "chat_id": "...", "hedef_fiyat": 6400.0, "yon": "YUKARI" | "ASAGI"}
+# Kullanıcıların kurduğu özel hedef fiyat alarmları listesi
 KULLANICI_ALARMLARI = []
 
-# Türkiye Saati (UTC+3) yardımcısı (Bulut sunucularda saat kaymasını önler)
+# Türkiye Saati (UTC+3) yardımcısı
 TR_SAAT_DILIMI = timezone(timedelta(hours=3))
 
 
@@ -64,7 +67,7 @@ def gemini_metin_uret(prompt: str, json_modu: bool = False) -> str:
 
 
 def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
-    """Gelen her mesajı Gemini'ye inceletir; niyeti, alarm hedefini, yılı veya sohbet cevabını JSON döndürür."""
+    """Gelen her mesajı Gemini'ye inceletir; niyeti, alarm hedefini, ML/Korelasyon veya grafik isteğini JSON döndürür."""
     bugun_str = tr_simdi().strftime("%Y-%m-%d")
     prompt = f"""
     Bugünün tarihi: {bugun_str}.
@@ -73,8 +76,8 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
 
     Bu mesajı incele ve SADECE aşağıdaki şemaya uygun geçerli bir JSON objesi döndür:
     {{
-        "niyet": "ANLIK_KUR" | "GUNLUK_GRAFIK" | "TARIH_FIYAT" | "GRAFIK_ANALIZ" | "ALARM_KUR" | "KAYNAK" | "SOHBET",
-        "hedef_fiyat": <Eğer niyet ALARM_KUR ise kullanıcının belirttiği Gram Altın (TL) hedef rakamı (örn: 6400.0), değilse null>,
+        "niyet": "ANLIK_KUR" | "GUNLUK_GRAFIK" | "TARIH_FIYAT" | "GRAFIK_ANALIZ" | "KORELASYON_ANALIZ" | "ML_TAHMIN" | "ALARM_KUR" | "KAYNAK" | "SOHBET",
+        "hedef_fiyat": <Eğer niyet ALARM_KUR ise kullanıcının belirttiği Gram Altın (TL) hedef rakamı (örn: 6500.0), değilse null>,
         "hedef_tarih": "<Eğer niyet TARIH_FIYAT ise YYYY-MM-DD formatında kesin tarih (örn: '2025-06-30'), değilse null>",
         "belirli_yil": <Eğer niyet GRAFIK_ANALIZ ise ve '2023 yılının grafiği' gibi TEK BİR TAKVİM YILI istendiyse o yıl (örn: 2023), değilse null>,
         "yil_sayisi": <Eğer niyet GRAFIK_ANALIZ ise ve belirli_yil null ise 'son 5 yıl' için tam sayı (örn: 5), 'max/tüm yıllar' için null, belirtilmediyse 2>,
@@ -83,11 +86,13 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
     }}
 
     Kurallar:
-    - 'altın 6400 TL olursa haber ver', '6200'e düşerse uyar', '6500 olunca alarm kur' gibi hedef fiyat bildirim isteklerinde niyet = "ALARM_KUR" ve hedef_fiyat = sayı (float).
-    - 'bugünün güncel kurunun grafiği', 'bugünkü altın grafiği', 'gün içi grafik', 'anlık fiyat grafiği' gibi BUGÜNÜN SAATLİK/DAKİKALIK grafiği isteniyorsa niyet = "GUNLUK_GRAFIK".
+    - 'korelasyon', 'ısı haritası', 'heatmap', 'seaborn', 'veri bilimi analizi', 'ons mu dolar mı daha etkili' isteklerinde niyet = "KORELASYON_ANALIZ".
+    - 'tahmin', 'gelecek ay ne olur', 'yapay zeka tahmini', 'makine öğrenmesi', 'regresyon', 'önümüzdeki ay' isteklerinde niyet = "ML_TAHMIN".
+    - 'altın 6500 TL olursa haber ver', '6200'e düşerse uyar', 'alarm kur' gibi hedef fiyat bildirim isteklerinde niyet = "ALARM_KUR" ve hedef_fiyat = sayı (float).
+    - 'bugünün güncel kurunun grafiği', 'bugünkü altın grafiği', 'gün içi grafik', 'anlık fiyat grafiği' gibi BUGÜNÜN SAATLİK grafiği isteniyorsa niyet = "GUNLUK_GRAFIK".
     - 'bugün altın ne kadar', 'güncel kur' gibi sadece metin olarak anlık fiyat sorularında niyet = "ANLIK_KUR".
-    - '30.06.2025 de altın ne kadardı', 'geçen sene 30 haziranda neydi' gibi GÜN/AY/YIL içeren tek bir günün fiyatında (grafik kelimesi geçmiyorsa) niyet = "TARIH_FIYAT" ve hedef_tarih = "YYYY-MM-DD".
-    - '2023 yılının altın grafiği', '2021 grafiğini at' gibi belirli bir yılın grafiği isteniyorsa niyet = "GRAFIK_ANALIZ" ve belirli_yil = 2023 (istenen yıl) olsun.
+    - '30.06.2025 de altın ne kadardı', 'geçen sene 30 haziranda neydi' gibi tek bir günün fiyatında (grafik kelimesi geçmiyorsa) niyet = "TARIH_FIYAT" ve hedef_tarih = "YYYY-MM-DD".
+    - '2023 yılının altın grafiği', '2021 grafiğini at' gibi belirli bir yılın grafiği isteniyorsa niyet = "GRAFIK_ANALIZ" ve belirli_yil = 2023.
     - 'son 5 yılın grafiği', 'tüm yılları kıyasla' gibi çok yıllı isteklerde niyet = "GRAFIK_ANALIZ", belirli_yil = null ve yil_sayisi = 5 (veya max için null).
     - 'kaynağın ne', 'veriler nereden' sorularında niyet = "KAYNAK".
     - 'teşekkürler', 'sağ ol', 'merhaba', 'nasılsın' veya genel sohbetlerde niyet = "SOHBET".
@@ -106,7 +111,7 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
             "belirli_yil": None,
             "yil_sayisi": 2,
             "hedef": "AYNI",
-            "sohbet_cevabi": f"Rica ederim {gonderen_adi}! Ben Yummi, her zaman buradayım. Güncel altın kurunu, bugünün saatlik grafiğini veya hedef fiyat alarmı kurmayı isteyebilirsin."
+            "sohbet_cevabi": f"Rica ederim {gonderen_adi}! Ben Yummi, her zaman buradayım. Güncel altın kurunu, korelasyon ısı haritasını veya yapay zeka fiyat tahminini isteyebilirsin."
         }
 
 
@@ -123,7 +128,7 @@ def canli_fiyat_verisi_al() -> tuple:
 
 
 def finans_verisi_cek(sembol: str, aralik: str = "2y", periyot: str = "1d") -> pd.DataFrame:
-    """Doğrudan REST API endpoint'ine HTTP GET isteği atarak ham JSON verisini çeker."""
+    """Doğrudan REST API'den veriyi çeker, Pandas ile eksik ve mükerrer kayıtları temizler."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sembol}?range={aralik}&interval={periyot}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -143,7 +148,149 @@ def finans_verisi_cek(sembol: str, aralik: str = "2y", periyot: str = "1d") -> p
         "Zaman": zaman_serisi if periyot != "1d" else zaman_serisi.date,
         sembol: kapanislar
     })
-    return df.dropna()
+    # Veri temizleme aşaması: kirli/eksik ve tekrar eden satırları silme
+    return df.dropna().drop_duplicates(subset=["Zaman"])
+
+
+def korelasyon_ve_barplot_analizi_gonder(hedef_chat_id: str):
+    """Seaborn ile Korelasyon Isı Haritası (Heatmap) ve Aylık Ortalama Barplot çizer, istatistiksel yorumla gönderir."""
+    print("[Veri Bilimi] 5 yıllık veri çekiliyor, Seaborn Heatmap ve Barplot oluşturuluyor...")
+    df_ons = finans_verisi_cek("GC=F", aralik="5y", periyot="1d")
+    df_kur = finans_verisi_cek("TRY=X", aralik="5y", periyot="1d")
+
+    df = pd.merge(df_ons, df_kur, on="Zaman", how="inner").dropna().drop_duplicates()
+    df["Gram_Altin_TL"] = (df["GC=F"] * df["TRY=X"]) / 31.1035
+    df["Tarih"] = pd.to_datetime(df["Zaman"])
+    df["Ay_No"] = df["Tarih"].dt.month
+
+    ay_isimleri = {
+        1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan", 5: "Mayıs", 6: "Haziran",
+        7: "Temmuz", 8: "Ağustos", 9: "Eylül", 10: "Ekim", 11: "Kasım", 12: "Aralık"
+    }
+    df["Ay"] = df["Ay_No"].map(ay_isimleri)
+
+    # Korelasyon matrisi için sayısal kolonları seç
+    korelasyon_df = df[["GC=F", "TRY=X", "Gram_Altin_TL"]].rename(columns={
+        "GC=F": "Ons Altın ($)",
+        "TRY=X": "Dolar / TL",
+        "Gram_Altin_TL": "Gram Altın (TL)"
+    })
+    korelasyon_matrisi = korelasyon_df.corr()
+
+    # Aylık ortalama performans sıralaması (Barplot için)
+    aylik_ort = df.groupby("Ay", as_index=False)["Gram_Altin_TL"].mean().sort_values(by="Gram_Altin_TL", ascending=False)
+
+    grafik_yolu = "korelasyon_ve_dagilim.png"
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6.2))
+
+    # Sol Grafik: Seaborn Korelasyon Isı Haritası (Heatmap)
+    sns.heatmap(korelasyon_matrisi, annot=True, fmt=".2f", cmap="YlOrBr", ax=axes[0], cbar=True)
+    axes[0].set_title("Değişkenler Arası Korelasyon Isı Haritası", fontsize=12, fontweight="bold")
+
+    # Sağ Grafik: Seaborn Aylık Ortalama Barplot
+    sns.barplot(data=aylik_ort, x="Gram_Altin_TL", y="Ay", palette="viridis", hue="Ay", legend=False, ax=axes[1])
+    axes[1].set_title("Son 5 Yılın Aylık Ortalama Gram Altın Sıralaması", fontsize=12, fontweight="bold")
+    axes[1].set_xlabel("Ortalama Gram Altın (TL)")
+    axes[1].set_ylabel("Aylar")
+
+    fig.suptitle("Veri Bilimi & Keşifçi Veri Analizi (EDA) Raporu", fontsize=14, fontweight="bold")
+    plt.figtext(0.99, 0.01, "Beykoz Üni - Python & Yapay Zeka Final Projesi", fontsize=9, color="gray", ha="right")
+    plt.tight_layout()
+    plt.savefig(grafik_yolu, dpi=300)
+    plt.close()
+
+    ons_corr = korelasyon_matrisi.loc["Ons Altın ($)", "Gram Altın (TL)"]
+    kur_corr = korelasyon_matrisi.loc["Dolar / TL", "Gram Altın (TL)"]
+    en_yuksek_ay = aylik_ort.iloc[0]["Ay"]
+    en_yuksek_deger = aylik_ort.iloc[0]["Gram_Altin_TL"]
+
+    aciklama = (
+        f"🔬 VERİ BİLİMİ & KORELASYON ANALİZİ (Seaborn EDA)\n\n"
+        f"• Dolar/TL ↔ Gram Altın Korelasyonu: {kur_corr:.2f}\n"
+        f"• Ons Altın ↔ Gram Altın Korelasyonu: {ons_corr:.2f}\n"
+        f"• Tarihsel En Yüksek Ortalama Ay: {en_yuksek_ay} ({en_yuksek_deger:,.2f} ₺)\n\n"
+        f"📌 İstatistiksel Çıkarım: Korelasyon katsayılarına göre Türkiye'de Gram Altın fiyatı üzerinde "
+        f"{'Dolar/TL kuru' if kur_corr >= ons_corr else 'Küresel Ons Altın fiyatı'} daha belirleyici bir etkiye sahiptir."
+    )
+
+    with open(grafik_yolu, "rb") as foto:
+        telegram_istek_gonder(
+            "sendPhoto",
+            data={"chat_id": hedef_chat_id, "caption": "🔬 Korelasyon Isı Haritası (Heatmap) ve Aylık Dağılım Grafiği"},
+            files={"photo": foto}
+        )
+    telegram_istek_gonder("sendMessage", data={"chat_id": hedef_chat_id, "text": aciklama})
+    print("✅ Korelasyon ısı haritası ve Seaborn barplot Telegram'a iletildi.")
+
+
+def makine_ogrenmesi_fiyat_tahmini_gonder(hedef_chat_id: str):
+    """Scikit-Learn MinMaxScaler ile veriyi ölçekler ve LinearRegression ile 30 günlük trend tahmini üretir."""
+    print("[ML Tahmin] MinMaxScaler ön işleme ve Lineer Regresyon modeli çalıştırılıyor...")
+    df_ons = finans_verisi_cek("GC=F", aralik="1y", periyot="1d")
+    df_kur = finans_verisi_cek("TRY=X", aralik="1y", periyot="1d")
+
+    df = pd.merge(df_ons, df_kur, on="Zaman", how="inner").dropna().drop_duplicates()
+    df["Gram_Altin_TL"] = (df["GC=F"] * df["TRY=X"]) / 31.1035
+    df = df.reset_index(drop=True)
+    df["Gun_Indeksi"] = np.arange(len(df))
+
+    # Yapay Zeka Ön İşleme: MinMaxScaler ile 0-1 aralığına normalizasyon
+    scaler_x = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+
+    X_scaled = scaler_x.fit_transform(df[["Gun_Indeksi"]])
+    y_scaled = scaler_y.fit_transform(df[["Gram_Altin_TL"]])
+
+    model = LinearRegression()
+    model.fit(X_scaled, y_scaled)
+
+    # Gelecek 30 işlem günü için tahmin üret
+    son_indeks = df["Gun_Indeksi"].iloc[-1]
+    gelecek_indeksler = np.arange(son_indeks + 1, son_indeks + 31).reshape(-1, 1)
+    gelecek_x_scaled = scaler_x.transform(pd.DataFrame(gelecek_indeksler, columns=["Gun_Indeksi"]))
+    tahmin_scaled = model.predict(gelecek_x_scaled)
+    tahmin_tl = scaler_y.inverse_transform(tahmin_scaled).flatten()
+
+    mevcut_fiyat = df["Gram_Altin_TL"].iloc[-1]
+    otuz_gun_sonra = tahmin_tl[-1]
+    beklenen_degisim = ((otuz_gun_sonra - mevcut_fiyat) / mevcut_fiyat) * 100
+    r2_skoru = model.score(X_scaled, y_scaled)
+
+    # Grafik çizimi
+    grafik_yolu = "ml_fiyat_tahmini.png"
+    plt.figure(figsize=(12, 5.5))
+    tarihler = pd.to_datetime(df["Zaman"])
+    gelecek_tarihler = pd.date_range(start=tarihler.iloc[-1] + pd.Timedelta(days=1), periods=30, freq="B")
+
+    plt.plot(tarihler, df["Gram_Altin_TL"], label="Gerçekleşen Son 1 Yıl (TL)", color="#1f77b4", linewidth=2)
+    plt.plot(gelecek_tarihler, tahmin_tl, label="ML Lineer Regresyon Tahmini (30 İş Günü)", color="#d62728", linestyle="--", linewidth=2.5)
+    plt.title("Scikit-Learn (MinMaxScaler + Lineer Regresyon) Altın Fiyat Trend Tahmini", fontsize=12.5, fontweight="bold")
+    plt.xlabel("Tarih")
+    plt.ylabel("Gram Altın (TL)")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend()
+    plt.text(0.99, 0.02, "Beykoz Üni - Python & Yapay Zeka Final Projesi", fontsize=9, color="gray", ha="right", transform=plt.gca().transAxes)
+    plt.tight_layout()
+    plt.savefig(grafik_yolu, dpi=300)
+    plt.close()
+
+    mesaj = (
+        f"🤖 MAKİNE ÖĞRENMESİ (ML) FİYAT TREND TAHMİNİ\n\n"
+        f"• Kullanılan Yöntem: MinMaxScaler (0-1 Normalizasyon) + Lineer Regresyon\n"
+        f"• Model Uyum Skoru (R²): {r2_skoru:.2f}\n"
+        f"• Güncel Gram Altın: {mevcut_fiyat:,.2f} ₺\n"
+        f"• 30 İş Günü Sonrası Trend Hedefi: {otuz_gun_sonra:,.2f} ₺ (%{beklenen_degisim:+.2f})\n\n"
+        f"⚠️ Not: Bu çıktı geçmiş 1 yıllık verinin doğrusal regresyon eğilimini gösterir, kesin yatırım tavsiyesi değildir."
+    )
+
+    with open(grafik_yolu, "rb") as foto:
+        telegram_istek_gonder(
+            "sendPhoto",
+            data={"chat_id": hedef_chat_id, "caption": "🤖 Makine Öğrenmesi (MinMaxScaler + Lineer Regresyon) Tahmin Grafiği"},
+            files={"photo": foto}
+        )
+    telegram_istek_gonder("sendMessage", data={"chat_id": hedef_chat_id, "text": mesaj})
+    print("✅ ML fiyat tahmini grafiği ve raporu Telegram'a iletildi.")
 
 
 def saatlik_otomatik_kur_mesaji() -> tuple:
@@ -207,7 +354,7 @@ def gunluk_canli_grafik_gonder(hedef_chat_id: str):
         f"• Gün İçi En Yüksek: {en_yuksek:,.2f} ₺\n"
         f"• Gün İçi En Düşük: {en_dusuk:,.2f} ₺\n"
         f"• Son Ons / Dolar: {df['GC=F'].iloc[-1]:,.2f} $ | {df['TRY=X'].iloc[-1]:,.4f} ₺\n\n"
-        f"💬 Geçmiş yılların analizini isterseniz '2023 yılının grafiğini at' veya 'son 5 yılın grafiği' yazabilirsiniz."
+        f"💬 Geçmiş yılların analizini isterseniz '2023 yılının grafiğini at' veya 'korelasyon haritası at' yazabilirsiniz."
     )
 
     with open(grafik_yolu, "rb") as foto:
@@ -267,7 +414,7 @@ def anlik_altin_kuru_getir() -> str:
         f"• Ons Altın (USD): {ons_fiyat:,.2f} $\n"
         f"• Dolar / TL: {kur_fiyat:,.4f} ₺\n\n"
         f"ℹ️ Veriler canlı finans API'si üzerinden anlık hesaplanmıştır.\n\n"
-        f"💬 Başka bir isteğiniz var mı? (Örn: 'altın 6400 TL olursa haber ver' veya 'son 5 yılın grafiği')"
+        f"💬 Başka bir isteğiniz var mı? (Örn: 'altın 6500 TL olursa haber ver' veya 'gelecek ay altın tahmini')"
     )
 
 
@@ -409,7 +556,7 @@ def telegrama_gonder(rapor_metni: str, grafik_yolu: str, hedef_chat_id: str, mev
             files={"photo": foto}
         )
 
-    devam_notu = "\n\n💬 Başka bir analiz veya grafik ister misiniz? (Örn: 'son 10 yılın grafiğini gruba at' veya '2024 yılının grafiğini at')"
+    devam_notu = "\n\n💬 Başka bir analiz veya grafik ister misiniz? (Örn: 'korelasyon haritası at' veya 'gelecek ay altın tahmini')"
     baslik = f"🪙 {donem_baslik} ({len(mevcut_yillar)} YILLIK) ALTIN ANALİZ RAPORU\n\n"
     tam_mesaj = (baslik + rapor_metni)[:3850] + devam_notu
 
@@ -436,7 +583,7 @@ def boru_hattini_calistir(yil_sayisi: Optional[int] = 2, belirli_yil: Optional[i
 
 
 def telegram_bot_dinle():
-    """Otomatik ±20 TL piyasa alarmı, kullanıcı özel hedef fiyat alarmları ve AI niyet yönlendiricisi."""
+    """Canlı piyasa takibi, özel hedef fiyat alarmları, Veri Bilimi (Seaborn/ML) ve Gemini AI Niyet Yönlendiricisi."""
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     son_update_id = None
 
@@ -446,14 +593,14 @@ def telegram_bot_dinle():
 
     karsilama_mesaji = (
         "Selam Hoşgeldiniz! Ben Altın Analiz Asistanınız Yummi, size nasıl yardımcı olabilirim?\n"
-        f"🚨 Gram Altın ±{FIYAT_DEGISIM_ESIGI_TL:.0f} TL oynadığında ve her saat başı otomatik bildirim atacağım.\n\n"
+        "🚨 Altın fiyatlarında ani düşüş veya yükseliş olduğunda ve her saat başı size anında bildireceğim.\n\n"
         "💡 Neler Yapabilirim? (Doğrudan yazmanız yeterli):\n"
         "• güncel altın kuru ne (Anlık Gram, Ons ve Dolar kurunu söyler)\n"
-        "• altın 6400 TL olursa haber ver (Hedef fiyatınıza ulaşınca alarm verir)\n"
+        "• altın 6500 TL olursa haber ver (Belirlediğiniz fiyata ulaşınca özel alarm verir)\n"
         "• bugünün güncel kurunun grafiğini at (Gün içi saatlik canlı grafik çizer)\n"
-        "• 30.06.2025 tarihinde altın ne kadardı (İstediğiniz geçmiş tarihin fiyatını söyler)\n"
         "• 2023 yılının altın grafiğini at (Belirli bir yılın grafiğini çizer)\n"
-        "• son 5 yılın grafiğini gruba at (Çok yıllı kıyaslama yapar)"
+        "• korelasyon ısı haritası at (Ons, Dolar ve Gram ilişkisini Seaborn ile analiz eder)\n"
+        "• gelecek ay altın tahmini (Makine Öğrenmesi ile 30 günlük trend tahmini yapar)"
     )
 
     hedef_grup = str(GRUP_CHAT_ID).strip() if GRUP_CHAT_ID else ""
@@ -469,11 +616,11 @@ def telegram_bot_dinle():
     referans_gram_fiyat = None
     try:
         referans_gram_fiyat, _, _ = canli_fiyat_verisi_al()
-        print(f"📌 Başlangıç Referans Gram Altın Fiyatı: {referans_gram_fiyat:,.2f} TL (Eşik: ±{FIYAT_DEGISIM_ESIGI_TL:.0f} TL)")
+        print(f"📌 Başlangıç Referans Gram Altın Fiyatı: {referans_gram_fiyat:,.2f} TL")
     except Exception as e:
         print(f"⚠️ İlk referans fiyat alınamadı, ilk kontrolde güncellenecek: {e}")
 
-    print("\n🐱 Yummi Aktif! Otomatik ±20 TL alarmı ve Özel Hedef Alarm sistemi devrede... (Durdurmak için Ctrl+C)\n")
+    print("\n🐱 Yummi Aktif! Canlı piyasa alarmları, Veri Bilimi modülleri ve AI Router devrede... (Durdurmak için Ctrl+C)\n")
 
     son_bildirim_saati = tr_simdi().strftime("%Y-%m-%d %H")
     son_fiyat_kontrol_zamani = time.time()
@@ -482,40 +629,40 @@ def telegram_bot_dinle():
         try:
             simdi_tr = tr_simdi()
 
-            # --- 1. CANLI FİYAT KONTROLÜ (Otomatik ±20 TL + Kullanıcı Özel Alarmları) ---
+            # --- 1. CANLI FİYAT KONTROLÜ (Otomatik Ani Değişim + Kullanıcı Özel Alarmları) ---
             if (time.time() - son_fiyat_kontrol_zamani) >= KONTROL_ARALIGI_SN:
                 son_fiyat_kontrol_zamani = time.time()
                 try:
                     guncel_gram, guncel_ons, guncel_kur = canli_fiyat_verisi_al()
                     simdi_str = simdi_tr.strftime("%d.%m.%Y %H:%M")
 
-                    # A) 2. SEÇENEK: ±20 TL Otomatik Piyasa Değişim Alarmı
+                    # A) Ani Piyasa Değişimi Bildirimi
                     if hedef_grup:
                         if referans_gram_fiyat is None:
                             referans_gram_fiyat = guncel_gram
                         else:
                             fark_tl = guncel_gram - referans_gram_fiyat
                             if abs(fark_tl) >= FIYAT_DEGISIM_ESIGI_TL:
-                                yon_ikon = "📈 YÜKSELİŞ ALARMI" if fark_tl > 0 else "📉 DÜŞÜŞ ALARMI"
+                                yon_ikon = "📈 ANİ YÜKSELİŞ BİLDİRİMİ" if fark_tl > 0 else "📉 ANİ DÜŞÜŞ BİLDİRİMİ"
                                 alarm_mesaji = (
                                     f"🚨 {yon_ikon} ({simdi_str})\n"
-                                    f"Altın fiyatı {fark_tl:+.2f} TL değişti!\n\n"
+                                    f"Altın fiyatında {fark_tl:+.2f} TL hareket gerçekleşti!\n\n"
                                     f"• Şu Anki Fiyat: {guncel_gram:,.2f} TL\n"
-                                    f"• Önceki Bildirim: {referans_gram_fiyat:,.2f} TL\n"
+                                    f"• Önceki Seviye: {referans_gram_fiyat:,.2f} TL\n"
                                     f"• Ons / Dolar: {guncel_ons:,.2f} $ | {guncel_kur:,.4f} ₺"
                                 )
                                 telegram_istek_gonder("sendMessage", data={"chat_id": hedef_grup, "text": alarm_mesaji})
-                                print(f"🚨 Piyasa değişim alarmı gönderildi: {referans_gram_fiyat:,.2f} -> {guncel_gram:,.2f} TL")
+                                print(f"🚨 Ani fiyat hareketi bildirildi: {referans_gram_fiyat:,.2f} -> {guncel_gram:,.2f} TL")
                                 referans_gram_fiyat = guncel_gram
 
-                    # B) 3. SEÇENEK: Kullanıcıların Kurduğu Hedef Fiyat Alarmları
+                    # B) Kullanıcıların Kurduğu Hedef Fiyat Alarmları
                     for alarm in list(KULLANICI_ALARMLARI):
                         hedef_f = alarm["hedef_fiyat"]
                         tetiklendi = (alarm["yon"] == "YUKARI" and guncel_gram >= hedef_f) or (alarm["yon"] == "ASAGI" and guncel_gram <= hedef_f)
                         if tetiklendi:
                             ozel_alarm_msg = (
                                 f"🔔 ÖZEL HEDEF FİYAT ALARMI ({simdi_str})\n"
-                                f"Hey {alarm['kisi']}, kurduğun hedefe ulaşıldı!\n\n"
+                                f"Hey {alarm['kisi']}, belirlediğin seviyeye ulaşıldı!\n\n"
                                 f"• Hedef Fiyatın: {hedef_f:,.2f} TL\n"
                                 f"• Güncel Gram Altın: {guncel_gram:,.2f} TL\n"
                                 f"• Ons / Dolar: {guncel_ons:,.2f} $ | {guncel_kur:,.4f} ₺"
@@ -581,7 +728,15 @@ def telegram_bot_dinle():
                 hedef_id = gonderen_id if hedef_secim == "DM" else (hedef_grup if hedef_secim == "GRUP" else sohbet_id)
                 print(f"🎯 Karar -> Niyet: {niyet} | Hedef: {hedef_secim} (Chat ID: {hedef_id})")
 
-                if niyet == "ALARM_KUR" and karar.get("hedef_fiyat"):
+                if niyet == "KORELASYON_ANALIZ":
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": f"🔬 {gonderen_adi}, Seaborn korelasyon ısı haritası ve aylık dağılım analizi hazırlanıyor..."})
+                    korelasyon_ve_barplot_analizi_gonder(hedef_chat_id=hedef_id)
+
+                elif niyet == "ML_TAHMIN":
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": f"🤖 {gonderen_adi}, MinMaxScaler ve Lineer Regresyon modeli eğitiliyor, tahmin hazırlanıyor..."})
+                    makine_ogrenmesi_fiyat_tahmini_gonder(hedef_chat_id=hedef_id)
+
+                elif niyet == "ALARM_KUR" and karar.get("hedef_fiyat"):
                     hedef_f = float(karar["hedef_fiyat"])
                     mevcut_gram, _, _ = canli_fiyat_verisi_al()
                     yon = "YUKARI" if hedef_f >= mevcut_gram else "ASAGI"
@@ -630,9 +785,9 @@ def telegram_bot_dinle():
                     kaynak_bilgi = (
                         "📡 VERİ KAYNAĞI VE MİMARİ BİLGİSİ\n\n"
                         "• Canlı & Tarihsel Piyasa Verisi: Yahoo Finance REST API (`GC=F` Ons Altın ve `TRY=X` Dolar/TL)\n"
-                        "• Veri İşleme & Hesaplama: Python Pandas (`(Ons * Dolar) / 31.1035`)\n"
-                        "• Görselleştirme: Matplotlib\n"
-                        "• Yapay Zeka Analizi & Niyet Yönlendirme: Google Gemini LLM API\n\n"
+                        "• Veri Temizleme & İşleme: Python Pandas (`dropna`, `drop_duplicates`, `(Ons * Dolar) / 31.1035`)\n"
+                        "• İstatistik & Görselleştirme: Seaborn (`heatmap`, `barplot`) ve Matplotlib\n"
+                        "• Makine Öğrenmesi & Yapay Zeka: Scikit-Learn (`MinMaxScaler`, `LinearRegression`) ve Google Gemini LLM API\n\n"
                         "💬 Başka bir isteğiniz var mı?"
                     )
                     telegram_istek_gonder("sendMessage", data={"chat_id": hedef_id, "text": kaynak_bilgi})
