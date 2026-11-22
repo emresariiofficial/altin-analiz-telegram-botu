@@ -16,6 +16,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GRUP_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# 2. SEÇENEK: Otomatik piyasa değişim eşiği (TL cinsinden)
+FIYAT_DEGISIM_ESIGI_TL = 20.0
+KONTROL_ARALIGI_SN = 45
+
+# 3. SEÇENEK: Kullanıcıların kurduğu özel hedef fiyat alarmları listesi
+# Her öğe: {"kisi": "Ada Su", "chat_id": "...", "hedef_fiyat": 6400.0, "yon": "YUKARI" | "ASAGI"}
+KULLANICI_ALARMLARI = []
+
 # Türkiye Saati (UTC+3) yardımcısı (Bulut sunucularda saat kaymasını önler)
 TR_SAAT_DILIMI = timezone(timedelta(hours=3))
 
@@ -56,7 +64,7 @@ def gemini_metin_uret(prompt: str, json_modu: bool = False) -> str:
 
 
 def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
-    """Gelen her mesajı Gemini'ye inceletir; niyeti, belirli yılı, yıl sayısını veya sohbet cevabını JSON döndürür."""
+    """Gelen her mesajı Gemini'ye inceletir; niyeti, alarm hedefini, yılı veya sohbet cevabını JSON döndürür."""
     bugun_str = tr_simdi().strftime("%Y-%m-%d")
     prompt = f"""
     Bugünün tarihi: {bugun_str}.
@@ -65,7 +73,8 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
 
     Bu mesajı incele ve SADECE aşağıdaki şemaya uygun geçerli bir JSON objesi döndür:
     {{
-        "niyet": "ANLIK_KUR" | "GUNLUK_GRAFIK" | "TARIH_FIYAT" | "GRAFIK_ANALIZ" | "KAYNAK" | "SOHBET",
+        "niyet": "ANLIK_KUR" | "GUNLUK_GRAFIK" | "TARIH_FIYAT" | "GRAFIK_ANALIZ" | "ALARM_KUR" | "KAYNAK" | "SOHBET",
+        "hedef_fiyat": <Eğer niyet ALARM_KUR ise kullanıcının belirttiği Gram Altın (TL) hedef rakamı (örn: 6400.0), değilse null>,
         "hedef_tarih": "<Eğer niyet TARIH_FIYAT ise YYYY-MM-DD formatında kesin tarih (örn: '2025-06-30'), değilse null>",
         "belirli_yil": <Eğer niyet GRAFIK_ANALIZ ise ve '2023 yılının grafiği' gibi TEK BİR TAKVİM YILI istendiyse o yıl (örn: 2023), değilse null>,
         "yil_sayisi": <Eğer niyet GRAFIK_ANALIZ ise ve belirli_yil null ise 'son 5 yıl' için tam sayı (örn: 5), 'max/tüm yıllar' için null, belirtilmediyse 2>,
@@ -74,6 +83,7 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
     }}
 
     Kurallar:
+    - 'altın 6400 TL olursa haber ver', '6200'e düşerse uyar', '6500 olunca alarm kur' gibi hedef fiyat bildirim isteklerinde niyet = "ALARM_KUR" ve hedef_fiyat = sayı (float).
     - 'bugünün güncel kurunun grafiği', 'bugünkü altın grafiği', 'gün içi grafik', 'anlık fiyat grafiği' gibi BUGÜNÜN SAATLİK/DAKİKALIK grafiği isteniyorsa niyet = "GUNLUK_GRAFIK".
     - 'bugün altın ne kadar', 'güncel kur' gibi sadece metin olarak anlık fiyat sorularında niyet = "ANLIK_KUR".
     - '30.06.2025 de altın ne kadardı', 'geçen sene 30 haziranda neydi' gibi GÜN/AY/YIL içeren tek bir günün fiyatında (grafik kelimesi geçmiyorsa) niyet = "TARIH_FIYAT" ve hedef_tarih = "YYYY-MM-DD".
@@ -91,12 +101,25 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
         print(f"⚠️ Niyet analizi yedek moda düştü: {e}")
         return {
             "niyet": "SOHBET",
+            "hedef_fiyat": None,
             "hedef_tarih": None,
             "belirli_yil": None,
             "yil_sayisi": 2,
             "hedef": "AYNI",
-            "sohbet_cevabi": f"Rica ederim {gonderen_adi}! Ben Yummi, her zaman buradayım. Güncel altın kurunu, bugünün saatlik grafiğini veya geçmiş yılların analizini sorabilirsin."
+            "sohbet_cevabi": f"Rica ederim {gonderen_adi}! Ben Yummi, her zaman buradayım. Güncel altın kurunu, bugünün saatlik grafiğini veya hedef fiyat alarmı kurmayı isteyebilirsin."
         }
+
+
+def canli_fiyat_verisi_al() -> tuple:
+    """Yahoo Finance API'den anlık (gram_altin_tl, ons_usd, dolar_tl) üçlüsünü döndürür."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res_ons = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m", headers=headers, timeout=10).json()
+    res_kur = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/TRY=X?range=1d&interval=1m", headers=headers, timeout=10).json()
+
+    ons_fiyat = float(res_ons["chart"]["result"][0]["meta"]["regularMarketPrice"])
+    kur_fiyat = float(res_kur["chart"]["result"][0]["meta"]["regularMarketPrice"])
+    gram_altin = (ons_fiyat * kur_fiyat) / 31.1035
+    return gram_altin, ons_fiyat, kur_fiyat
 
 
 def finans_verisi_cek(sembol: str, aralik: str = "2y", periyot: str = "1d") -> pd.DataFrame:
@@ -123,22 +146,17 @@ def finans_verisi_cek(sembol: str, aralik: str = "2y", periyot: str = "1d") -> p
     return df.dropna()
 
 
-def saatlik_otomatik_kur_mesaji() -> str:
-    """Her saat başı gruba otomatik atılacak kısa ve net güncel altın fiyat mesajını hazırlar."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res_ons = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m", headers=headers, timeout=10).json()
-    res_kur = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/TRY=X?range=1d&interval=1m", headers=headers, timeout=10).json()
-
-    ons_fiyat = res_ons["chart"]["result"][0]["meta"]["regularMarketPrice"]
-    kur_fiyat = res_kur["chart"]["result"][0]["meta"]["regularMarketPrice"]
-    gram_altin = (ons_fiyat * kur_fiyat) / 31.1035
+def saatlik_otomatik_kur_mesaji() -> tuple:
+    """Her saat başı gruba otomatik atılacak kısa güncel altın fiyat mesajını ve o anki gram fiyatını döndürür."""
+    gram_altin, ons_fiyat, kur_fiyat = canli_fiyat_verisi_al()
     simdi_str = tr_simdi().strftime("%d.%m.%Y %H:%M")
 
-    return (
+    mesaj = (
         f"⏰ SAATLİK KUR BİLDİRİMİ ({simdi_str})\n"
         f"Şu an altının güncel fiyatı: {gram_altin:,.2f} TL\n"
         f"(Ons: {ons_fiyat:,.2f} $ | Dolar: {kur_fiyat:,.4f} ₺)"
     )
+    return mesaj, gram_altin
 
 
 def gunluk_canli_grafik_gonder(hedef_chat_id: str):
@@ -240,13 +258,7 @@ def gecmis_tarih_fiyat_getir(hedef_tarih_str: str) -> str:
 
 def anlik_altin_kuru_getir() -> str:
     """Canlı API'den o anki güncel Ons Altın, Dolar/TL ve hesaplanan Gram Altın (TL) fiyatını döndürür."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res_ons = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=1m", headers=headers, timeout=10).json()
-    res_kur = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/TRY=X?range=1d&interval=1m", headers=headers, timeout=10).json()
-
-    ons_fiyat = res_ons["chart"]["result"][0]["meta"]["regularMarketPrice"]
-    kur_fiyat = res_kur["chart"]["result"][0]["meta"]["regularMarketPrice"]
-    gram_altin = (ons_fiyat * kur_fiyat) / 31.1035
+    gram_altin, ons_fiyat, kur_fiyat = canli_fiyat_verisi_al()
     zaman_damgasi = tr_simdi().strftime("%d.%m.%Y %H:%M")
 
     return (
@@ -255,7 +267,7 @@ def anlik_altin_kuru_getir() -> str:
         f"• Ons Altın (USD): {ons_fiyat:,.2f} $\n"
         f"• Dolar / TL: {kur_fiyat:,.4f} ₺\n\n"
         f"ℹ️ Veriler canlı finans API'si üzerinden anlık hesaplanmıştır.\n\n"
-        f"💬 Başka bir isteğiniz var mı? (Örn: 'bugünün güncel kurunun grafiğini at' veya 'son 5 yılın grafiği')"
+        f"💬 Başka bir isteğiniz var mı? (Örn: 'altın 6400 TL olursa haber ver' veya 'son 5 yılın grafiği')"
     )
 
 
@@ -424,7 +436,7 @@ def boru_hattini_calistir(yil_sayisi: Optional[int] = 2, belirli_yil: Optional[i
 
 
 def telegram_bot_dinle():
-    """Açılışta, her saat başında ve gruba yeni biri katıldığında bilgi verir; tüm mesajları Gemini AI Router ile yorumlar."""
+    """Otomatik ±20 TL piyasa alarmı, kullanıcı özel hedef fiyat alarmları ve AI niyet yönlendiricisi."""
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     son_update_id = None
 
@@ -434,14 +446,14 @@ def telegram_bot_dinle():
 
     karsilama_mesaji = (
         "Selam Hoşgeldiniz! Ben Altın Analiz Asistanınız Yummi, size nasıl yardımcı olabilirim?\n"
-        "⏰ Ayrıca her saat başı güncel altın fiyatını gruba otomatik olarak paylaşacağım.\n\n"
+        f"🚨 Gram Altın ±{FIYAT_DEGISIM_ESIGI_TL:.0f} TL oynadığında ve her saat başı otomatik bildirim atacağım.\n\n"
         "💡 Neler Yapabilirim? (Doğrudan yazmanız yeterli):\n"
         "• güncel altın kuru ne (Anlık Gram, Ons ve Dolar kurunu söyler)\n"
+        "• altın 6400 TL olursa haber ver (Hedef fiyatınıza ulaşınca alarm verir)\n"
         "• bugünün güncel kurunun grafiğini at (Gün içi saatlik canlı grafik çizer)\n"
         "• 30.06.2025 tarihinde altın ne kadardı (İstediğiniz geçmiş tarihin fiyatını söyler)\n"
         "• 2023 yılının altın grafiğini at (Belirli bir yılın grafiğini çizer)\n"
-        "• son 5 yılın grafiğini gruba at (Çok yıllı kıyaslama yapar)\n"
-        "• /analiz max (En eski tarihten bugüne tüm yılları kıyaslar)"
+        "• son 5 yılın grafiğini gruba at (Çok yıllı kıyaslama yapar)"
     )
 
     hedef_grup = str(GRUP_CHAT_ID).strip() if GRUP_CHAT_ID else ""
@@ -454,26 +466,80 @@ def telegram_bot_dinle():
         except Exception as e:
             print(f"❌ Karşılama mesajı gönderilemedi: {e}")
 
-    print("\n🐱 Yummi Aktif! Saatlik kur bildirimi ve Yapay Zeka Niyet Yönlendiricisi devrede... (Durdurmak için Ctrl+C)\n")
+    referans_gram_fiyat = None
+    try:
+        referans_gram_fiyat, _, _ = canli_fiyat_verisi_al()
+        print(f"📌 Başlangıç Referans Gram Altın Fiyatı: {referans_gram_fiyat:,.2f} TL (Eşik: ±{FIYAT_DEGISIM_ESIGI_TL:.0f} TL)")
+    except Exception as e:
+        print(f"⚠️ İlk referans fiyat alınamadı, ilk kontrolde güncellenecek: {e}")
 
-    # Açılış saatini kaydet ki o saat geçip bir sonraki saat başı gelince otomatik bildirim atsın
+    print("\n🐱 Yummi Aktif! Otomatik ±20 TL alarmı ve Özel Hedef Alarm sistemi devrede... (Durdurmak için Ctrl+C)\n")
+
     son_bildirim_saati = tr_simdi().strftime("%Y-%m-%d %H")
+    son_fiyat_kontrol_zamani = time.time()
 
     while True:
         try:
-            # --- SAATLİK OTOMATİK GÜNCEL FİYAT BİLDİRİMİ KONTROLÜ ---
             simdi_tr = tr_simdi()
+
+            # --- 1. CANLI FİYAT KONTROLÜ (Otomatik ±20 TL + Kullanıcı Özel Alarmları) ---
+            if (time.time() - son_fiyat_kontrol_zamani) >= KONTROL_ARALIGI_SN:
+                son_fiyat_kontrol_zamani = time.time()
+                try:
+                    guncel_gram, guncel_ons, guncel_kur = canli_fiyat_verisi_al()
+                    simdi_str = simdi_tr.strftime("%d.%m.%Y %H:%M")
+
+                    # A) 2. SEÇENEK: ±20 TL Otomatik Piyasa Değişim Alarmı
+                    if hedef_grup:
+                        if referans_gram_fiyat is None:
+                            referans_gram_fiyat = guncel_gram
+                        else:
+                            fark_tl = guncel_gram - referans_gram_fiyat
+                            if abs(fark_tl) >= FIYAT_DEGISIM_ESIGI_TL:
+                                yon_ikon = "📈 YÜKSELİŞ ALARMI" if fark_tl > 0 else "📉 DÜŞÜŞ ALARMI"
+                                alarm_mesaji = (
+                                    f"🚨 {yon_ikon} ({simdi_str})\n"
+                                    f"Altın fiyatı {fark_tl:+.2f} TL değişti!\n\n"
+                                    f"• Şu Anki Fiyat: {guncel_gram:,.2f} TL\n"
+                                    f"• Önceki Bildirim: {referans_gram_fiyat:,.2f} TL\n"
+                                    f"• Ons / Dolar: {guncel_ons:,.2f} $ | {guncel_kur:,.4f} ₺"
+                                )
+                                telegram_istek_gonder("sendMessage", data={"chat_id": hedef_grup, "text": alarm_mesaji})
+                                print(f"🚨 Piyasa değişim alarmı gönderildi: {referans_gram_fiyat:,.2f} -> {guncel_gram:,.2f} TL")
+                                referans_gram_fiyat = guncel_gram
+
+                    # B) 3. SEÇENEK: Kullanıcıların Kurduğu Hedef Fiyat Alarmları
+                    for alarm in list(KULLANICI_ALARMLARI):
+                        hedef_f = alarm["hedef_fiyat"]
+                        tetiklendi = (alarm["yon"] == "YUKARI" and guncel_gram >= hedef_f) or (alarm["yon"] == "ASAGI" and guncel_gram <= hedef_f)
+                        if tetiklendi:
+                            ozel_alarm_msg = (
+                                f"🔔 ÖZEL HEDEF FİYAT ALARMI ({simdi_str})\n"
+                                f"Hey {alarm['kisi']}, kurduğun hedefe ulaşıldı!\n\n"
+                                f"• Hedef Fiyatın: {hedef_f:,.2f} TL\n"
+                                f"• Güncel Gram Altın: {guncel_gram:,.2f} TL\n"
+                                f"• Ons / Dolar: {guncel_ons:,.2f} $ | {guncel_kur:,.4f} ₺"
+                            )
+                            telegram_istek_gonder("sendMessage", data={"chat_id": alarm["chat_id"], "text": ozel_alarm_msg})
+                            KULLANICI_ALARMLARI.remove(alarm)
+                            print(f"🔔 {alarm['kisi']} kullanıcısının {hedef_f:,.2f} TL alarmı tetiklendi!")
+
+                except Exception as alarm_hatasi:
+                    print(f"⚠️ Anlık fiyat kontrolü atlandı: {alarm_hatasi}")
+
+            # --- 2. SAATLİK OTOMATİK KUR BİLDİRİMİ ---
             suanki_saat_anahtari = simdi_tr.strftime("%Y-%m-%d %H")
             if hedef_grup and suanki_saat_anahtari != son_bildirim_saati and simdi_tr.minute == 0:
                 try:
-                    otomatik_mesaj = saatlik_otomatik_kur_mesaji()
+                    otomatik_mesaj, guncel_gram = saatlik_otomatik_kur_mesaji()
                     telegram_istek_gonder("sendMessage", data={"chat_id": hedef_grup, "text": otomatik_mesaj})
                     son_bildirim_saati = suanki_saat_anahtari
+                    referans_gram_fiyat = guncel_gram
                     print(f"⏰ Saatlik kur bildirimi gruba gönderildi ({simdi_tr.strftime('%H:%M')}).")
                 except Exception as saat_hatasi:
                     print(f"⚠️ Saatlik bildirim gönderilemedi: {saat_hatasi}")
 
-            # --- GELEN TELEGRAM MESAJLARINI DİNLE ---
+            # --- 3. GELEN TELEGRAM MESAJLARINI DİNLE ---
             params = {"timeout": 1}
             if son_update_id:
                 params["offset"] = son_update_id
@@ -515,7 +581,26 @@ def telegram_bot_dinle():
                 hedef_id = gonderen_id if hedef_secim == "DM" else (hedef_grup if hedef_secim == "GRUP" else sohbet_id)
                 print(f"🎯 Karar -> Niyet: {niyet} | Hedef: {hedef_secim} (Chat ID: {hedef_id})")
 
-                if niyet == "ANLIK_KUR":
+                if niyet == "ALARM_KUR" and karar.get("hedef_fiyat"):
+                    hedef_f = float(karar["hedef_fiyat"])
+                    mevcut_gram, _, _ = canli_fiyat_verisi_al()
+                    yon = "YUKARI" if hedef_f >= mevcut_gram else "ASAGI"
+                    yon_yazi = "yükseldiğinde" if yon == "YUKARI" else "düştüğünde"
+                    KULLANICI_ALARMLARI.append({
+                        "kisi": gonderen_adi,
+                        "chat_id": hedef_id,
+                        "hedef_fiyat": hedef_f,
+                        "yon": yon
+                    })
+                    onay_msg = (
+                        f"✅ {gonderen_adi}, alarmın kuruldu!\n"
+                        f"• Hedef Seviye: {hedef_f:,.2f} TL ({yon_yazi})\n"
+                        f"• Şu Anki Fiyat: {mevcut_gram:,.2f} TL\n"
+                        f"• Bildirim Yeri: {'Özel Mesaj (DM)' if hedef_secim == 'DM' else 'Grup'}"
+                    )
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": onay_msg})
+
+                elif niyet == "ANLIK_KUR":
                     kur_raporu = anlik_altin_kuru_getir()
                     telegram_istek_gonder("sendMessage", data={"chat_id": hedef_id, "text": kur_raporu})
 
