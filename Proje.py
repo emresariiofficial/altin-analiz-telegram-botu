@@ -524,22 +524,26 @@ def llm_ile_analiz_et(ozet_df: pd.DataFrame, mevcut_yillar: list) -> str:
     return gemini_metin_uret(prompt, json_modu=False)
 
 
-def telegram_istek_gonder(metot: str, data: dict, files=None, deneme_sayisi: int = 3):
-    """PythonAnywhere proxy kesintilerine (503) karşı otomatik yeniden denemeli Telegram göndericisi."""
+def telegram_istek_gonder(metot: str, data: Optional[dict] = None, params: Optional[dict] = None, files=None, deneme_sayisi: int = 6, http_metot: str = "POST"):
+    """PythonAnywhere proxy kesintilerine (503) karşı otomatik yeniden denemeli Telegram istemcisi."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metot}"
     for deneme in range(1, deneme_sayisi + 1):
         try:
             if files:
                 for f in files.values():
                     f.seek(0)
-            res = requests.post(url, data=data, files=files, timeout=15)
+            if http_metot.upper() == "GET":
+                res = requests.get(url, params=params, timeout=15)
+            else:
+                res = requests.post(url, data=data, params=params, files=files, timeout=15)
             res.raise_for_status()
             return res
         except Exception as e:
             if deneme == deneme_sayisi:
                 raise e
-            print(f"   🔄 Telegram bağlantısı yenileniyor ({deneme}/{deneme_sayisi})...")
-            time.sleep(2)
+            bekleme_suresi = min(15, deneme * 3)
+            print(f"   🔄 Telegram bağlantısı bekleniyor ({deneme}/{deneme_sayisi}) - {bekleme_suresi}sn...")
+            time.sleep(bekleme_suresi)
 
 
 def telegrama_gonder(rapor_metni: str, grafik_yolu: str, hedef_chat_id: str, mevcut_yillar: list):
@@ -584,10 +588,17 @@ def boru_hattini_calistir(yil_sayisi: Optional[int] = 2, belirli_yil: Optional[i
 
 def telegram_bot_dinle():
     """Canlı piyasa takibi, özel hedef fiyat alarmları, etkileşimli dönem sorgusu ve AI Router."""
-    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     son_update_id = None
 
-    ilk_yanit = requests.get(f"{base_url}/getUpdates", timeout=15).json()
+    ilk_yanit = {}
+    while True:
+        try:
+            ilk_yanit = telegram_istek_gonder("getUpdates", deneme_sayisi=5, http_metot="GET").json()
+            break
+        except Exception as ilk_hata:
+            print(f"⚠️ Açılışta Telegram proxy'sine ulaşılamadı, 10 sn sonra tekrar denenecek: {str(ilk_hata)[:60]}")
+            time.sleep(10)
+
     if ilk_yanit.get("result"):
         son_update_id = ilk_yanit["result"][-1]["update_id"] + 1
 
@@ -691,7 +702,7 @@ def telegram_bot_dinle():
             if son_update_id:
                 params["offset"] = son_update_id
 
-            yanit = requests.get(f"{base_url}/getUpdates", params=params, timeout=15).json()
+            yanit = telegram_istek_gonder("getUpdates", params=params, deneme_sayisi=4, http_metot="GET").json()
             for guncelleme in yanit.get("result", []):
                 son_update_id = guncelleme["update_id"] + 1
                 mesaj = guncelleme.get("message") or guncelleme.get("channel_post")
