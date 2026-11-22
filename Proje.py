@@ -273,36 +273,50 @@ def llm_ile_analiz_et(ozet_df: pd.DataFrame, mevcut_yillar: list) -> str:
     return gemini_metin_uret(prompt, json_modu=False)
 
 
+def telegram_istek_gonder(metot: str, data: dict, files=None, deneme_sayisi: int = 3):
+    """PythonAnywhere proxy kesintilerine (503) karşı otomatik yeniden denemeli Telegram göndericisi."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metot}"
+    for deneme in range(1, deneme_sayisi + 1):
+        try:
+            if files:
+                # Dosya akışını her denemede başa sar
+                for f in files.values():
+                    f.seek(0)
+            res = requests.post(url, data=data, files=files, timeout=15)
+            res.raise_for_status()
+            return res
+        except Exception as e:
+            if deneme == deneme_sayisi:
+                raise e
+            print(f"   🔄 Telegram bağlantısı yenileniyor ({deneme}/{deneme_sayisi})...")
+            time.sleep(2)
+
+
 def telegrama_gonder(rapor_metni: str, grafik_yolu: str, hedef_chat_id: str, mevcut_yillar: list):
     donem_baslik = str(mevcut_yillar[0]) if len(mevcut_yillar) == 1 else f"{mevcut_yillar[0]}-{mevcut_yillar[-1]}"
     print(f"[4/4] Analiz raporu ve grafik hedef sohbete ({hedef_chat_id}) gönderiliyor...")
-    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
     with open(grafik_yolu, "rb") as foto:
-        res_foto = requests.post(
-            f"{base_url}/sendPhoto",
+        telegram_istek_gonder(
+            "sendPhoto",
             data={
                 "chat_id": hedef_chat_id,
                 "caption": f"📊 {donem_baslik} Dönemi Aylık Ortalama Gram Altın Grafiği"
             },
-            files={"photo": foto},
-            timeout=15
+            files={"photo": foto}
         )
-        res_foto.raise_for_status()
 
     devam_notu = "\n\n💬 Başka bir analiz veya grafik ister misiniz? (Örn: 'son 10 yılın grafiğini gruba at' veya '2024 yılının grafiğini at')"
     baslik = f"🪙 {donem_baslik} ({len(mevcut_yillar)} YILLIK) ALTIN ANALİZ RAPORU\n\n"
     tam_mesaj = (baslik + rapor_metni)[:3850] + devam_notu
 
-    res_mesaj = requests.post(
-        f"{base_url}/sendMessage",
+    telegram_istek_gonder(
+        "sendMessage",
         data={
             "chat_id": hedef_chat_id,
             "text": tam_mesaj
-        },
-        timeout=15
+        }
     )
-    res_mesaj.raise_for_status()
     print("✅ İşlem tamamlandı! Rapor ve grafik Telegram'a başarıyla iletildi.")
 
 
@@ -342,25 +356,22 @@ def telegram_bot_dinle():
     print(f"📡 Hedef Grup ID (.env): '{hedef_grup}'")
 
     if hedef_grup:
-        res_acilis = requests.post(
-            f"{base_url}/sendMessage",
-            data={"chat_id": hedef_grup, "text": karsilama_mesaji},
-            timeout=10
-        )
-        if res_acilis.status_code == 200:
+        try:
+            telegram_istek_gonder("sendMessage", data={"chat_id": hedef_grup, "text": karsilama_mesaji})
             print("✅ Karşılama mesajı gruba başarıyla gönderildi!")
-        else:
-            print(f"❌ Karşılama mesajı gönderilemedi! Hata kodu: {res_acilis.status_code} | Detay: {res_acilis.text}")
+        except Exception as e:
+            print(f"❌ Karşılama mesajı gönderilemedi: {e}")
 
     print("\n🐱 Yummi Aktif! Yapay Zeka Niyet Yönlendiricisi devrede, mesajlarınız bekleniyor... (Durdurmak için Ctrl+C)\n")
 
     while True:
         try:
-            params = {"timeout": 10}
+            # PythonAnywhere ücretsiz proxy tünelini (503) düşürmemek için kısa timeout (1 sn)
+            params = {"timeout": 1}
             if son_update_id:
                 params["offset"] = son_update_id
 
-            yanit = requests.get(f"{base_url}/getUpdates", params=params, timeout=20).json()
+            yanit = requests.get(f"{base_url}/getUpdates", params=params, timeout=15).json()
             for guncelleme in yanit.get("result", []):
                 son_update_id = guncelleme["update_id"] + 1
                 mesaj = guncelleme.get("message") or guncelleme.get("channel_post")
@@ -374,7 +385,7 @@ def telegram_bot_dinle():
                         if not yeni_uye.get("is_bot"):
                             yeni_isim = yeni_uye.get("first_name", "Dostum")
                             hosgeldin = f"👋 Aramıza hoş geldin {yeni_isim}!\n\n{karsilama_mesaji}"
-                            requests.post(f"{base_url}/sendMessage", data={"chat_id": sohbet_id, "text": hosgeldin}, timeout=10)
+                            telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": hosgeldin})
                     continue
 
                 if "text" not in mesaj or mesaj.get("from", {}).get("is_bot"):
@@ -393,13 +404,13 @@ def telegram_bot_dinle():
 
                 if niyet == "ANLIK_KUR":
                     kur_raporu = anlik_altin_kuru_getir()
-                    requests.post(f"{base_url}/sendMessage", data={"chat_id": hedef_id, "text": kur_raporu}, timeout=10)
+                    telegram_istek_gonder("sendMessage", data={"chat_id": hedef_id, "text": kur_raporu})
 
                 elif niyet == "TARIH_FIYAT" and karar.get("hedef_tarih"):
                     tarih_str = karar["hedef_tarih"]
-                    requests.post(f"{base_url}/sendMessage", data={"chat_id": sohbet_id, "text": f"🔍 {gonderen_adi}, {tarih_str} tarihli piyasa verileri kontrol ediliyor..."}, timeout=10)
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": f"🔍 {gonderen_adi}, {tarih_str} tarihli piyasa verileri kontrol ediliyor..."})
                     tarih_raporu = gecmis_tarih_fiyat_getir(tarih_str)
-                    requests.post(f"{base_url}/sendMessage", data={"chat_id": hedef_id, "text": tarih_raporu}, timeout=10)
+                    telegram_istek_gonder("sendMessage", data={"chat_id": hedef_id, "text": tarih_raporu})
 
                 elif niyet == "KAYNAK":
                     kaynak_bilgi = (
@@ -410,7 +421,7 @@ def telegram_bot_dinle():
                         "• Yapay Zeka Analizi & Niyet Yönlendirme: Google Gemini LLM API\n\n"
                         "💬 Başka bir isteğiniz var mı?"
                     )
-                    requests.post(f"{base_url}/sendMessage", data={"chat_id": hedef_id, "text": kaynak_bilgi}, timeout=10)
+                    telegram_istek_gonder("sendMessage", data={"chat_id": hedef_id, "text": kaynak_bilgi})
 
                 elif niyet == "GRAFIK_ANALIZ":
                     belirli_yil = karar.get("belirli_yil")
@@ -424,20 +435,22 @@ def telegram_bot_dinle():
                     else:
                         hedef_bilgi = f"⏳ {donem_etiket.capitalize()} canlı altın verileri çekiliyor ve analiz hazırlanıyor..."
 
-                    requests.post(f"{base_url}/sendMessage", data={"chat_id": sohbet_id, "text": hedef_bilgi}, timeout=10)
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": hedef_bilgi})
 
                     try:
                         boru_hattini_calistir(yil_sayisi=yil, belirli_yil=belirli_yil, hedef_chat_id=hedef_id)
                     except Exception as gonderim_hatasi:
                         if hedef_secim == "DM" and "403" in str(gonderim_hatasi):
                             uyari = f"⚠️ {gonderen_adi}, sana özelden mesaj atabilmem için önce bana özel sohbetten /start yazmalısın!"
-                            requests.post(f"{base_url}/sendMessage", data={"chat_id": sohbet_id, "text": uyari}, timeout=10)
+                            telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": uyari})
                         else:
                             raise gonderim_hatasi
 
                 else:  # SOHBET
                     sohbet_yaniti = karar.get("sohbet_cevabi") or f"Rica ederim {gonderen_adi}! Başka nasıl yardımcı olabilirim?"
-                    requests.post(f"{base_url}/sendMessage", data={"chat_id": sohbet_id, "text": sohbet_yaniti}, timeout=10)
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": sohbet_yaniti})
+
+            time.sleep(2)
 
         except KeyboardInterrupt:
             print("\n🛑 Yummi durduruldu.")
