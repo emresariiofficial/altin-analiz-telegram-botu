@@ -27,6 +27,9 @@ KONTROL_ARALIGI_SN = 45
 # Kullanıcıların kurduğu özel hedef fiyat alarmları listesi
 KULLANICI_ALARMLARI = []
 
+# Süre belirtilmeden istenen etki/ısı haritası taleplerini hatırlamak için
+BEKLEYEN_KORELASYON_ISTEGI = {}
+
 # Türkiye Saati (UTC+3) yardımcısı
 TR_SAAT_DILIMI = timezone(timedelta(hours=3))
 
@@ -80,20 +83,20 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
         "hedef_fiyat": <Eğer niyet ALARM_KUR ise kullanıcının belirttiği Gram Altın (TL) hedef rakamı (örn: 6500.0), değilse null>,
         "hedef_tarih": "<Eğer niyet TARIH_FIYAT ise YYYY-MM-DD formatında kesin tarih (örn: '2025-06-30'), değilse null>",
         "belirli_yil": <Eğer niyet GRAFIK_ANALIZ ise ve '2023 yılının grafiği' gibi TEK BİR TAKVİM YILI istendiyse o yıl (örn: 2023), değilse null>,
-        "yil_sayisi": <Eğer niyet GRAFIK_ANALIZ ise ve belirli_yil null ise 'son 5 yıl' için tam sayı (örn: 5), 'max/tüm yıllar' için null, belirtilmediyse 2>,
+        "yil_sayisi": <Eğer niyet GRAFIK_ANALIZ veya KORELASYON_ANALIZ ise ve belirli_yil null ise 'son 5 yıl' için tam sayı (örn: 5), 'max/tüm yıllar' için -1, belirtilmediyse null>,
         "hedef": "DM" | "GRUP" | "AYNI",
         "sohbet_cevabi": "<Eğer niyet SOHBET ise {gonderen_adi} kullanıcısına Yummi karakteriyle vereceğin samimi, kısa ve yardımcı Türkçe cevap; değilse boş string>"
     }}
 
     Kurallar:
-    - 'korelasyon', 'ısı haritası', 'etki analizi', 'ons mu dolar mı daha etkili', 'altın fiyatını ne etkiliyor', 'aylara göre ortalama' isteklerinde niyet = "KORELASYON_ANALIZ".
+    - 'korelasyon', 'ısı haritası', 'etki analizi', 'ons mu dolar mı daha etkili', 'altın fiyatını ne etkiliyor', 'aylara göre ortalama' isteklerinde niyet = "KORELASYON_ANALIZ". Mesajda açıkça süre/yıl belirtilmediyse yil_sayisi = null ve belirli_yil = null olsun; 'tüm yıllar/max' dendiyse yil_sayisi = -1 olsun.
     - 'tahmin', 'gelecek ay ne olur', 'önümüzdeki ay', 'trend tahmini', 'fiyat öngörüsü' isteklerinde niyet = "ML_TAHMIN".
     - 'altın şu fiyata çıkarsa haber ver', 'düşerse uyar', 'alarm kur' gibi hedef fiyat bildirim isteklerinde niyet = "ALARM_KUR" ve hedef_fiyat = sayı (float).
     - 'bugünün güncel kurunun grafiği', 'bugünkü altın grafiği', 'gün içi grafik', 'anlık fiyat grafiği' gibi BUGÜNÜN SAATLİK grafiği isteniyorsa niyet = "GUNLUK_GRAFIK".
     - 'bugün altın ne kadar', 'güncel kur' gibi sadece metin olarak anlık fiyat sorularında niyet = "ANLIK_KUR".
     - '30.06.2025 de altın ne kadardı', 'geçen sene 30 haziranda neydi' gibi tek bir günün fiyatında (grafik kelimesi geçmiyorsa) niyet = "TARIH_FIYAT" ve hedef_tarih = "YYYY-MM-DD".
     - '2023 yılının altın grafiği', '2021 grafiğini at' gibi belirli bir yılın grafiği isteniyorsa niyet = "GRAFIK_ANALIZ" ve belirli_yil = 2023.
-    - 'son 5 yılın grafiği', 'tüm yılları kıyasla' gibi çok yıllı isteklerde niyet = "GRAFIK_ANALIZ", belirli_yil = null ve yil_sayisi = 5 (veya max için null).
+    - 'son 5 yılın grafiği', 'tüm yılları kıyasla' gibi çok yıllı isteklerde niyet = "GRAFIK_ANALIZ", belirli_yil = null ve yil_sayisi = 5 (veya max/tüm yıllar için -1, belirtilmediyse 2).
     - 'kaynağın ne', 'veriler nereden' sorularında niyet = "KAYNAK".
     - 'teşekkürler', 'sağ ol', 'merhaba', 'nasılsın' veya genel sohbetlerde niyet = "SOHBET".
     - Mesajda 'bana at', 'at bana', 'bana gönder', 'gönder bana', 'özelden', 'dm', 'şahsıma' geçiyorsa hedef = "DM"; 'gruba' geçiyorsa "GRUP"; aksi halde "AYNI".
@@ -151,11 +154,14 @@ def finans_verisi_cek(sembol: str, aralik: str = "2y", periyot: str = "1d") -> p
     return df.dropna().drop_duplicates(subset=["Zaman"])
 
 
-def korelasyon_ve_barplot_analizi_gonder(hedef_chat_id: str):
-    """Arka planda Seaborn Heatmap ve Barplot kullanarak sade dille etki ve mevsimsel dağılım raporu sunar."""
-    print("[Etki Analizi] 5 yıllık veri çekiliyor, grafikler oluşturuluyor...")
-    df_ons = finans_verisi_cek("GC=F", aralik="5y", periyot="1d")
-    df_kur = finans_verisi_cek("TRY=X", aralik="5y", periyot="1d")
+def korelasyon_ve_barplot_analizi_gonder(hedef_chat_id: str, yil_sayisi: Optional[int] = 1):
+    """Arka planda Seaborn Heatmap ve Barplot kullanarak istenen yıl aralığına göre etki ve dağılım raporu sunar."""
+    aralik_str = "max" if yil_sayisi == -1 else f"{yil_sayisi}y"
+    donem_etiket = "Tüm tarihsel" if yil_sayisi == -1 else f"Son {yil_sayisi} yılın"
+
+    print(f"[Etki Analizi] {donem_etiket} verileri çekiliyor, grafikler oluşturuluyor...")
+    df_ons = finans_verisi_cek("GC=F", aralik=aralik_str, periyot="1d")
+    df_kur = finans_verisi_cek("TRY=X", aralik=aralik_str, periyot="1d")
 
     df = pd.merge(df_ons, df_kur, on="Zaman", how="inner").dropna().drop_duplicates()
     df["Gram_Altin_TL"] = (df["GC=F"] * df["TRY=X"]) / 31.1035
@@ -183,11 +189,11 @@ def korelasyon_ve_barplot_analizi_gonder(hedef_chat_id: str):
     axes[0].set_title("Fiyatları Etkileyen Faktörler (İlişki Tablosu)", fontsize=12, fontweight="bold")
 
     sns.barplot(data=aylik_ort, x="Gram_Altin_TL", y="Ay", palette="viridis", hue="Ay", legend=False, ax=axes[1])
-    axes[1].set_title("Son 5 Yılın Aylara Göre Ortalama Fiyat Sıralaması", fontsize=12, fontweight="bold")
+    axes[1].set_title(f"{donem_etiket} Aylara Göre Ortalama Fiyat Sıralaması", fontsize=12, fontweight="bold")
     axes[1].set_xlabel("Ortalama Gram Altın (TL)")
     axes[1].set_ylabel("Aylar")
 
-    fig.suptitle("Altın Fiyatı Etki ve Dönemsel Dağılım Analizi", fontsize=14, fontweight="bold")
+    fig.suptitle(f"Altın Fiyatı Etki ve Dönemsel Dağılım Analizi ({donem_etiket})", fontsize=14, fontweight="bold")
     plt.figtext(0.99, 0.01, "Beykoz Üni - Python & Yapay Zeka Final Projesi", fontsize=9, color="gray", ha="right")
     plt.tight_layout()
     plt.savefig(grafik_yolu, dpi=300)
@@ -199,10 +205,10 @@ def korelasyon_ve_barplot_analizi_gonder(hedef_chat_id: str):
     en_yuksek_deger = aylik_ort.iloc[0]["Gram_Altin_TL"]
 
     aciklama = (
-        f"📊 ALTIN FİYATI ETKİ VE DAĞILIM ANALİZİ\n\n"
+        f"📊 ALTIN FİYATI ETKİ VE DAĞILIM ANALİZİ ({donem_etiket.upper()})\n\n"
         f"• Dolar Kurunun Etkisi: %{kur_corr * 100:.0f} (1.00 üzerinden {kur_corr:.2f})\n"
         f"• Küresel Ons Fiyatının Etkisi: %{ons_corr * 100:.0f} (1.00 üzerinden {ons_corr:.2f})\n"
-        f"• Son 5 Yılın En Yüksek Ortalamalı Ayı: {en_yuksek_ay} ({en_yuksek_deger:,.2f} ₺)\n\n"
+        f"• {donem_etiket} En Yüksek Ortalamalı Ayı: {en_yuksek_ay} ({en_yuksek_deger:,.2f} ₺)\n\n"
         f"💡 Özet Yorum: Türkiye'de Gram Altın fiyatları üzerinde "
         f"{'Dolar/TL kurundaki hareketler' if kur_corr >= ons_corr else 'küresel Ons Altın hareketleri'} daha güçlü belirleyici rol oynamaktadır."
     )
@@ -210,11 +216,11 @@ def korelasyon_ve_barplot_analizi_gonder(hedef_chat_id: str):
     with open(grafik_yolu, "rb") as foto:
         telegram_istek_gonder(
             "sendPhoto",
-            data={"chat_id": hedef_chat_id, "caption": "📊 Altın Fiyatı Etki ve Dönemsel Dağılım Grafiği"},
+            data={"chat_id": hedef_chat_id, "caption": f"📊 {donem_etiket} Etki ve Dönemsel Dağılım Grafiği"},
             files={"photo": foto}
         )
     telegram_istek_gonder("sendMessage", data={"chat_id": hedef_chat_id, "text": aciklama})
-    print("✅ Sadeleştirilmiş etki analizi Telegram'a iletildi.")
+    print("✅ Dinamik etki analizi Telegram'a iletildi.")
 
 
 def makine_ogrenmesi_fiyat_tahmini_gonder(hedef_chat_id: str):
@@ -348,7 +354,7 @@ def gunluk_canli_grafik_gonder(hedef_chat_id: str):
         f"• Gün İçi En Yüksek: {en_yuksek:,.2f} ₺\n"
         f"• Gün İçi En Düşük: {en_dusuk:,.2f} ₺\n"
         f"• Son Ons / Dolar: {df['GC=F'].iloc[-1]:,.2f} $ | {df['TRY=X'].iloc[-1]:,.4f} ₺\n\n"
-        f"💬 Geçmiş yılların analizini isterseniz '2023 yılının grafiğini at' veya 'gelecek ay altın tahmini' yazabilirsiniz."
+        f"💬 Geçmiş yılların analizini, etki dağılımını veya gelecek ay öngörüsünü sorabilirsiniz."
     )
 
     with open(grafik_yolu, "rb") as foto:
@@ -420,8 +426,8 @@ def veri_isle_ve_gorsellestir(yil_sayisi: Optional[int] = 2, belirli_yil: Option
         aralik_str = "max" if fark > 10 else f"{fark}y"
         etiket = f"{belirli_yil} yılı"
     else:
-        aralik_str = "max" if yil_sayisi is None else f"{yil_sayisi}y"
-        etiket = "TÜM TARİHSEL (MAX)" if yil_sayisi is None else f"son {yil_sayisi} yıllık"
+        aralik_str = "max" if (yil_sayisi is None or yil_sayisi == -1) else f"{yil_sayisi}y"
+        etiket = "TÜM TARİHSEL (MAX)" if (yil_sayisi is None or yil_sayisi == -1) else f"son {yil_sayisi} yıllık"
 
     print(f"[1/4] Canlı API'den {etiket} Ons Altın ve Dolar/TL verileri çekiliyor...")
     df_ons = finans_verisi_cek("GC=F", aralik=aralik_str)
@@ -437,7 +443,7 @@ def veri_isle_ve_gorsellestir(yil_sayisi: Optional[int] = 2, belirli_yil: Option
 
     if belirli_yil is not None:
         df = df[df["Yil"] == belirli_yil]
-    elif yil_sayisi is not None:
+    elif yil_sayisi is not None and yil_sayisi != -1:
         hedef_yillar = list(range(guncel_yil - yil_sayisi + 1, guncel_yil + 1))
         df = df[df["Yil"].isin(hedef_yillar)]
 
@@ -577,7 +583,7 @@ def boru_hattini_calistir(yil_sayisi: Optional[int] = 2, belirli_yil: Optional[i
 
 
 def telegram_bot_dinle():
-    """Canlı piyasa takibi, özel hedef fiyat alarmları, sade kullanıcı mesajları ve AI Router."""
+    """Canlı piyasa takibi, özel hedef fiyat alarmları, etkileşimli dönem sorgusu ve AI Router."""
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     son_update_id = None
 
@@ -708,6 +714,20 @@ def telegram_bot_dinle():
                 ham_metin = mesaj["text"].strip()
                 gonderen_id = str(mesaj["from"]["id"]) if "from" in mesaj else sohbet_id
                 gonderen_adi = mesaj.get("from", {}).get("first_name", "Kullanıcı")
+                kucuk_metin = ham_metin.lower()
+
+                # Kullanıcı az önce sorulan "kaç yıllık analiz olsun?" sorusuna cevap veriyorsa:
+                if gonderen_id in BEKLEYEN_KORELASYON_ISTEGI and any(k in kucuk_metin for k in ["yıl", "yil", "tüm", "tum", "max", "1", "2", "3", "4", "5", "10"]):
+                    onceki_hedef = BEKLEYEN_KORELASYON_ISTEGI.pop(gonderen_id)
+                    if any(k in kucuk_metin for k in ["tüm", "tum", "max"]):
+                        secilen_yil = -1
+                    else:
+                        rakamlar = [int(s) for s in kucuk_metin.split() if s.isdigit()]
+                        secilen_yil = rakamlar[0] if rakamlar else 1
+                    etiket_kor = "tüm tarihsel" if secilen_yil == -1 else f"son {secilen_yil} yılın"
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": f"📊 {gonderen_adi}, {etiket_kor} verileri incelenerek etki ve dağılım analizi hazırlanıyor..."})
+                    korelasyon_ve_barplot_analizi_gonder(hedef_chat_id=onceki_hedef, yil_sayisi=secilen_yil)
+                    continue
 
                 print(f"🧠 [{gonderen_adi}]: '{ham_metin}' -> Gemini niyet analizi yapıyor...")
                 karar = yapay_zeka_niyet_analizi(ham_metin, gonderen_adi)
@@ -715,7 +735,6 @@ def telegram_bot_dinle():
                 hedef_secim = karar.get("hedef", "AYNI")
 
                 # Kesin kural: Mesajda "bana", "özel", "dm" veya "şahsıma" geçiyorsa doğrudan DM'e zorla
-                kucuk_metin = ham_metin.lower()
                 if any(k in kucuk_metin for k in ["bana", "özel", "dm", "şahsıma"]):
                     hedef_secim = "DM"
 
@@ -723,8 +742,16 @@ def telegram_bot_dinle():
                 print(f"🎯 Karar -> Niyet: {niyet} | Hedef: {hedef_secim} (Chat ID: {hedef_id})")
 
                 if niyet == "KORELASYON_ANALIZ":
-                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": f"📊 {gonderen_adi}, son 5 yılın verileri incelenerek etki ve dağılım analizi hazırlanıyor..."})
-                    korelasyon_ve_barplot_analizi_gonder(hedef_chat_id=hedef_id)
+                    sure_belirtilmis = any(k in kucuk_metin for k in ["yıl", "yil", "tüm", "tum", "max"])
+                    if not sure_belirtilmis:
+                        BEKLEYEN_KORELASYON_ISTEGI[gonderen_id] = hedef_id
+                        soru = f"🤔 {gonderen_adi}, kaç yıllık veriyi inceleyerek etki ve dağılım analizi hazırlamamı istersin? (Örn: 'son 1 yıl', 'son 3 yıl' veya 'tüm yıllar')"
+                        telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": soru})
+                    else:
+                        yil_kor = -1 if any(k in kucuk_metin for k in ["tüm", "tum", "max"]) else (karar.get("yil_sayisi") or 1)
+                        etiket_kor = "tüm tarihsel" if yil_kor == -1 else f"son {yil_kor} yılın"
+                        telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": f"📊 {gonderen_adi}, {etiket_kor} verileri incelenerek etki ve dağılım analizi hazırlanıyor..."})
+                        korelasyon_ve_barplot_analizi_gonder(hedef_chat_id=hedef_id, yil_sayisi=yil_kor)
 
                 elif niyet == "ML_TAHMIN":
                     telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": f"🔮 {gonderen_adi}, son dönem piyasa eğilimi hesaplanıyor, 1 aylık öngörü hazırlanıyor..."})
@@ -786,8 +813,8 @@ def telegram_bot_dinle():
 
                 elif niyet == "GRAFIK_ANALIZ":
                     belirli_yil = karar.get("belirli_yil")
-                    yil = karar.get("yil_sayisi")
-                    donem_etiket = f"{belirli_yil} yılı" if belirli_yil else ("tüm tarihsel" if yil is None else f"son {yil} yıllık")
+                    yil = karar.get("yil_sayisi") or 2
+                    donem_etiket = f"{belirli_yil} yılı" if belirli_yil else ("tüm tarihsel" if yil == -1 else f"son {yil} yıllık")
 
                     if hedef_secim == "DM":
                         hedef_bilgi = f"📩 {gonderen_adi}, {donem_etiket} analiz ve grafik hazırlanıyor; doğrudan özel mesaj (DM) olarak size gönderilecek."
