@@ -592,7 +592,7 @@ def telegram_bot_dinle():
         "• güncel altın kuru ne (Anlık Gram, Ons ve Dolar kurunu söyler)\n"
         "• hedef fiyat alarmı kur (İstediğiniz seviyeye ulaşınca size haber verir)\n"
         "• bugünün güncel kurunun grafiğini at (Gün içi saatlik canlı grafik çizer)\n"
-        "• 2023 yılının altın grafiğini at (Belirli bir yılın grafiğini çizer)\n"
+        "• geçmiş yıl veya dönem grafiği at (İstediğiniz yılın veya yılların analizini çizer)\n"
         "• altın fiyatını ne etkiliyor (Dolar, Ons ve aylara göre etki analizi yapar)\n"
         "• gelecek ay altın tahmini (Önümüzdeki 1 ay için fiyat trend öngörüsü sunar)"
     )
