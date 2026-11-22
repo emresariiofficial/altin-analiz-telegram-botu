@@ -57,22 +57,23 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
 
     Bu mesajı incele ve SADECE aşağıdaki şemaya uygun geçerli bir JSON objesi döndür:
     {{
-        "niyet": "ANLIK_KUR" | "TARIH_FIYAT" | "GRAFIK_ANALIZ" | "KAYNAK" | "SOHBET",
+        "niyet": "ANLIK_KUR" | "GUNLUK_GRAFIK" | "TARIH_FIYAT" | "GRAFIK_ANALIZ" | "KAYNAK" | "SOHBET",
         "hedef_tarih": "<Eğer niyet TARIH_FIYAT ise YYYY-MM-DD formatında kesin tarih (örn: '2025-06-30'), değilse null>",
-        "belirli_yil": <Eğer kullanıcı '2023 yılının grafiği', '2020 altın grafiği' gibi TEK BİR SPESİFİK TAKVİM YILI istediyse o yıl (örn: 2023), değilse null>,
-        "yil_sayisi": <Eğer belirli_yil null ise ve 'son 5 yıl' gibi bir aralık istendiyse tam sayı (örn: 5), 'max/tüm yıllar' istendiyse null, belirtilmediyse 2>,
+        "belirli_yil": <Eğer niyet GRAFIK_ANALIZ ise ve '2023 yılının grafiği' gibi TEK BİR TAKVİM YILI istendiyse o yıl (örn: 2023), değilse null>,
+        "yil_sayisi": <Eğer niyet GRAFIK_ANALIZ ise ve belirli_yil null ise 'son 5 yıl' için tam sayı (örn: 5), 'max/tüm yıllar' için null, belirtilmediyse 2>,
         "hedef": "DM" | "GRUP" | "AYNI",
         "sohbet_cevabi": "<Eğer niyet SOHBET ise {gonderen_adi} kullanıcısına Yummi karakteriyle vereceğin samimi, kısa ve yardımcı Türkçe cevap; değilse boş string>"
     }}
 
     Kurallar:
-    - '30.06.2025 de altın ne kadardı', 'geçen sene 30 haziranda neydi' gibi GÜN/AY/YIL içeren tek bir günün fiyatında niyet = "TARIH_FIYAT" ve hedef_tarih = "YYYY-MM-DD".
+    - 'bugünün güncel kurunun grafiği', 'bugünkü altın grafiği', 'gün içi grafik', 'anlık fiyat grafiği' gibi BUGÜNÜN SAATLİK/DAKİKALIK grafiği isteniyorsa niyet = "GUNLUK_GRAFIK".
+    - 'bugün altın ne kadar', 'güncel kur' gibi sadece metin olarak anlık fiyat sorularında niyet = "ANLIK_KUR".
+    - '30.06.2025 de altın ne kadardı', 'geçen sene 30 haziranda neydi' gibi GÜN/AY/YIL içeren tek bir günün fiyatında (grafik kelimesi geçmiyorsa) niyet = "TARIH_FIYAT" ve hedef_tarih = "YYYY-MM-DD".
     - '2023 yılının altın grafiği', '2021 grafiğini at' gibi belirli bir yılın grafiği isteniyorsa niyet = "GRAFIK_ANALIZ" ve belirli_yil = 2023 (istenen yıl) olsun.
     - 'son 5 yılın grafiği', 'tüm yılları kıyasla' gibi çok yıllı isteklerde niyet = "GRAFIK_ANALIZ", belirli_yil = null ve yil_sayisi = 5 (veya max için null).
-    - 'bugün altın ne kadar', 'güncel kur' sorularında niyet = "ANLIK_KUR".
     - 'kaynağın ne', 'veriler nereden' sorularında niyet = "KAYNAK".
     - 'teşekkürler', 'sağ ol', 'merhaba', 'nasılsın' veya genel sohbetlerde niyet = "SOHBET".
-    - Mesajda 'bana at', 'bana gönder', 'özelden', 'dm' geçiyorsa hedef = "DM"; 'gruba' geçiyorsa "GRUP"; aksi halde "AYNI".
+    - Mesajda 'bana at', 'at bana', 'bana gönder', 'gönder bana', 'özelden', 'dm', 'şahsıma' geçiyorsa hedef = "DM"; 'gruba' geçiyorsa "GRUP"; aksi halde "AYNI".
     """
     try:
         ham_yanit = gemini_metin_uret(prompt, json_modu=True)
@@ -86,13 +87,13 @@ def yapay_zeka_niyet_analizi(kullanici_mesaji: str, gonderen_adi: str) -> dict:
             "belirli_yil": None,
             "yil_sayisi": 2,
             "hedef": "AYNI",
-            "sohbet_cevabi": f"Rica ederim {gonderen_adi}! Ben Yummi, her zaman buradayım. Güncel altın kurunu, geçmiş bir tarihteki fiyatı veya istediğin yıl aralığının grafiğini sorabilirsin."
+            "sohbet_cevabi": f"Rica ederim {gonderen_adi}! Ben Yummi, her zaman buradayım. Güncel altın kurunu, bugünün saatlik grafiğini veya geçmiş yılların analizini sorabilirsin."
         }
 
 
-def finans_verisi_cek(sembol: str, aralik: str = "2y") -> pd.DataFrame:
-    """Doğrudan REST API endpoint'ine HTTP GET isteği atarak istenen aralıkta ham JSON verisini çeker."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sembol}?range={aralik}&interval=1d"
+def finans_verisi_cek(sembol: str, aralik: str = "2y", periyot: str = "1d") -> pd.DataFrame:
+    """Doğrudan REST API endpoint'ine HTTP GET isteği atarak ham JSON verisini çeker."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sembol}?range={aralik}&interval={periyot}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
     response = requests.get(url, headers=headers, timeout=15)
@@ -103,11 +104,76 @@ def finans_verisi_cek(sembol: str, aralik: str = "2y") -> pd.DataFrame:
     zamanlar = sonuc["timestamp"]
     kapanislar = sonuc["indicators"]["quote"][0]["close"]
 
+    zaman_serisi = pd.to_datetime(zamanlar, unit="s")
+    if periyot != "1d":
+        zaman_serisi = zaman_serisi.tz_localize("UTC").tz_convert("Europe/Istanbul")
+
     df = pd.DataFrame({
-        "Tarih": pd.to_datetime(zamanlar, unit="s").date,
+        "Zaman": zaman_serisi if periyot != "1d" else zaman_serisi.date,
         sembol: kapanislar
     })
     return df.dropna()
+
+
+def gunluk_canli_grafik_gonder(hedef_chat_id: str):
+    """Bugünün (son 24 saatin) 15 dakikalık canlı Gram Altın (TL) hareket grafiğini çizer ve gönderir."""
+    print("[1/3] Bugünün 15 dakikalık canlı Ons Altın ve Dolar/TL verileri çekiliyor...")
+    df_ons = finans_verisi_cek("GC=F", aralik="1d", periyot="15m")
+    df_kur = finans_verisi_cek("TRY=X", aralik="1d", periyot="15m")
+
+    df = pd.merge_asof(
+        df_ons.sort_values("Zaman"),
+        df_kur.sort_values("Zaman"),
+        on="Zaman",
+        direction="nearest"
+    )
+    df["Gram_Altin_TL"] = (df["GC=F"] * df["TRY=X"]) / 31.1035
+    df["Saat"] = df["Zaman"].dt.strftime("%H:%M")
+
+    guncel_fiyat = df["Gram_Altin_TL"].iloc[-1]
+    acilis_fiyat = df["Gram_Altin_TL"].iloc[0]
+    en_yuksek = df["Gram_Altin_TL"].max()
+    en_dusuk = df["Gram_Altin_TL"].min()
+    degisim_yuzde = ((guncel_fiyat - acilis_fiyat) / acilis_fiyat) * 100
+    tarih_bugun = datetime.now().strftime("%d.%m.%Y")
+
+    grafik_yolu = "gunluk_altin_grafigi.png"
+    plt.figure(figsize=(12, 5.5))
+    plt.plot(df["Saat"], df["Gram_Altin_TL"], marker="o", markersize=4, linewidth=2.2, color="#D4AF37", label="Gram Altın (TL)")
+    plt.fill_between(df["Saat"], df["Gram_Altin_TL"], min(df["Gram_Altin_TL"]) * 0.999, color="#D4AF37", alpha=0.15)
+
+    plt.title(f"Bugünün Canlı Gram Altın (TL) Hareket Grafiği ({tarih_bugun})", fontsize=13, fontweight="bold")
+    plt.xlabel("Saat (TSİ)")
+    plt.ylabel("Gram Altın (TL)")
+    plt.xticks(df["Saat"][::max(1, len(df) // 12)], rotation=45)
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend()
+    plt.text(
+        0.99, 0.02, "Beykoz Üni - Python & Yapay Zeka Final Projesi",
+        fontsize=9, color="gray", alpha=0.75,
+        ha="right", va="bottom", transform=plt.gca().transAxes
+    )
+    plt.tight_layout()
+    plt.savefig(grafik_yolu, dpi=300)
+    plt.close()
+
+    ozet_mesaj = (
+        f"📈 BUGÜNÜN CANLI GRAM ALTIN ÖZETİ ({tarih_bugun})\n\n"
+        f"• Güncel Fiyat: {guncel_fiyat:,.2f} ₺ (%{degisim_yuzde:+.2f})\n"
+        f"• Gün İçi En Yüksek: {en_yuksek:,.2f} ₺\n"
+        f"• Gün İçi En Düşük: {en_dusuk:,.2f} ₺\n"
+        f"• Son Ons / Dolar: {df['GC=F'].iloc[-1]:,.2f} $ | {df['TRY=X'].iloc[-1]:,.4f} ₺\n\n"
+        f"💬 Geçmiş yılların analizini isterseniz '2023 yılının grafiğini at' veya 'son 5 yılın grafiği' yazabilirsiniz."
+    )
+
+    with open(grafik_yolu, "rb") as foto:
+        telegram_istek_gonder(
+            "sendPhoto",
+            data={"chat_id": hedef_chat_id, "caption": f"📊 {tarih_bugun} Gün İçi Canlı Gram Altın (TL) Grafiği"},
+            files={"photo": foto}
+        )
+    telegram_istek_gonder("sendMessage", data={"chat_id": hedef_chat_id, "text": ozet_mesaj})
+    print("✅ Günlük canlı grafik ve özet Telegram'a iletildi.")
 
 
 def gecmis_tarih_fiyat_getir(hedef_tarih_str: str) -> str:
@@ -122,15 +188,15 @@ def gecmis_tarih_fiyat_getir(hedef_tarih_str: str) -> str:
 
         df_ons = finans_verisi_cek("GC=F", aralik=aralik)
         df_kur = finans_verisi_cek("TRY=X", aralik=aralik)
-        df = pd.merge(df_ons, df_kur, on="Tarih", how="inner")
+        df = pd.merge(df_ons, df_kur, on="Zaman", how="inner")
         df["Gram_Altin_TL"] = (df["GC=F"] * df["TRY=X"]) / 31.1035
 
-        uygun_kayitlar = df[df["Tarih"] <= hedef_dt]
+        uygun_kayitlar = df[df["Zaman"] <= hedef_dt]
         if uygun_kayitlar.empty:
             return f"⚠️ {hedef_dt.strftime('%d.%m.%Y')} tarihi için API arşivinde veri bulunamadı."
 
         secilen = uygun_kayitlar.iloc[-1]
-        gercek_tarih = secilen["Tarih"].strftime("%d.%m.%Y")
+        gercek_tarih = secilen["Zaman"].strftime("%d.%m.%Y")
         istenen_tarih = hedef_dt.strftime("%d.%m.%Y")
         tatil_notu = f"\nℹ️ ({istenen_tarih} piyasa tatiline denk geldiği için en yakın işlem günü olan {gercek_tarih} verisi alınmıştır.)" if gercek_tarih != istenen_tarih else ""
 
@@ -163,7 +229,7 @@ def anlik_altin_kuru_getir() -> str:
         f"• Ons Altın (USD): {ons_fiyat:,.2f} $\n"
         f"• Dolar / TL: {kur_fiyat:,.4f} ₺\n\n"
         f"ℹ️ Veriler canlı finans API'si üzerinden anlık hesaplanmıştır.\n\n"
-        f"💬 Başka bir isteğiniz var mı? (Örn: 'son 5 yılın grafiğini gruba at' veya 'bana son 20 yılın grafiğini at')"
+        f"💬 Başka bir isteğiniz var mı? (Örn: 'bugünün güncel kurunun grafiğini at' veya 'son 5 yılın grafiği')"
     )
 
 
@@ -183,9 +249,9 @@ def veri_isle_ve_gorsellestir(yil_sayisi: Optional[int] = 2, belirli_yil: Option
     df_kur = finans_verisi_cek("TRY=X", aralik=aralik_str)
 
     print(f"[2/4] Pandas ile veriler temizleniyor ve {etiket} analizi yapılıyor...")
-    df = pd.merge(df_ons, df_kur, on="Tarih", how="inner")
+    df = pd.merge(df_ons, df_kur, on="Zaman", how="inner")
     df["Gram_Altin_TL"] = (df["GC=F"] * df["TRY=X"]) / 31.1035
-    df["Tarih"] = pd.to_datetime(df["Tarih"])
+    df["Tarih"] = pd.to_datetime(df["Zaman"])
 
     df["Yil"] = df["Tarih"].dt.year
     df["Ay"] = df["Tarih"].dt.month
@@ -279,7 +345,6 @@ def telegram_istek_gonder(metot: str, data: dict, files=None, deneme_sayisi: int
     for deneme in range(1, deneme_sayisi + 1):
         try:
             if files:
-                # Dosya akışını her denemede başa sar
                 for f in files.values():
                     f.seek(0)
             res = requests.post(url, data=data, files=files, timeout=15)
@@ -345,10 +410,10 @@ def telegram_bot_dinle():
         "Selam Hoşgeldiniz! Ben Altın Analiz Asistanınız Yummi, size nasıl yardımcı olabilirim?\n\n"
         "💡 Neler Yapabilirim? (Doğrudan yazmanız yeterli):\n"
         "• güncel altın kuru ne (Anlık Gram, Ons ve Dolar kurunu söyler)\n"
+        "• bugünün güncel kurunun grafiğini at (Gün içi saatlik canlı grafik çizer)\n"
         "• 30.06.2025 tarihinde altın ne kadardı (İstediğiniz geçmiş tarihin fiyatını söyler)\n"
         "• 2023 yılının altın grafiğini at (Belirli bir yılın grafiğini çizer)\n"
         "• son 5 yılın grafiğini gruba at (Çok yıllı kıyaslama yapar)\n"
-        "• bana son 20 yılın grafiğini at (Özel mesajınıza atar)\n"
         "• /analiz max (En eski tarihten bugüne tüm yılları kıyaslar)"
     )
 
@@ -366,7 +431,6 @@ def telegram_bot_dinle():
 
     while True:
         try:
-            # PythonAnywhere ücretsiz proxy tünelini (503) düşürmemek için kısa timeout (1 sn)
             params = {"timeout": 1}
             if son_update_id:
                 params["offset"] = son_update_id
@@ -405,6 +469,22 @@ def telegram_bot_dinle():
                 if niyet == "ANLIK_KUR":
                     kur_raporu = anlik_altin_kuru_getir()
                     telegram_istek_gonder("sendMessage", data={"chat_id": hedef_id, "text": kur_raporu})
+
+                elif niyet == "GUNLUK_GRAFIK":
+                    if hedef_secim == "DM":
+                        bilgi = f"📩 {gonderen_adi}, bugünün saatlik canlı altın grafiği hazırlanıyor; özel mesajınıza gönderilecek."
+                    else:
+                        bilgi = f"📈 {gonderen_adi}, bugünün saatlik canlı altın grafiği hazırlanıyor..."
+                    telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": bilgi})
+
+                    try:
+                        gunluk_canli_grafik_gonder(hedef_chat_id=hedef_id)
+                    except Exception as gonderim_hatasi:
+                        if hedef_secim == "DM" and "403" in str(gonderim_hatasi):
+                            uyari = f"⚠️ {gonderen_adi}, sana özelden mesaj atabilmem için önce bana özel sohbetten /start yazmalısın!"
+                            telegram_istek_gonder("sendMessage", data={"chat_id": sohbet_id, "text": uyari})
+                        else:
+                            raise gonderim_hatasi
 
                 elif niyet == "TARIH_FIYAT" and karar.get("hedef_tarih"):
                     tarih_str = karar["hedef_tarih"]
